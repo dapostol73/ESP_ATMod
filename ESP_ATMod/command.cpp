@@ -1794,6 +1794,17 @@ void cmd_AT_CIPSTATUS()
 			Serial.printf_P(PSTR("+CIPSTATUS:%d,\"%s\",\"%s\",%d,%d,0\r\n"), i, types_text[clients[i].type],
 							cli->remoteIP().toString().c_str(), cli->remotePort(), cli->localPort());
 		}
+    else if (clients[i].clientUDP != nullptr)
+    {
+			if (!statusPrinted)
+			{
+				Serial.println(F("STATUS:3"));
+				statusPrinted = true;
+			}
+
+			Serial.printf_P(PSTR("+CIPSTATUS:%d,\"UDP\",\"%s\",%d,%d,0\r\n"), i, 
+							clients[i].remoteUDPAddr.toString().c_str(), clients[i].remoteUDPPort, clients[i].clientUDP->localPort());
+    }
 	}
 
 	if (!statusPrinted)
@@ -1904,6 +1915,7 @@ void cmd_AT_CIPSTART()
 	clientTypes_t type = TYPE_NONE; // 0 = TCP, 1 = UDP, 2 = SSL
 	char *remoteAddr;
 	uint32_t remotePort = 0;
+  uint32_t localPort = 0;  // UDP local port
 
 	do
 	{
@@ -1972,20 +1984,56 @@ void cmd_AT_CIPSTART()
 		if (!readNumber(inputBuffer, offset, remotePort) || remotePort > 65535)
 			break;
 
-		// TCP timeout is read but ignored
+    if (type == TYPE_TCP || type == TYPE_SSL)
+    {
+      // TCP timeout is read but ignored
 
-		if (offset + 2 < inputBufferCnt)
-		{
-			if (inputBuffer[offset] != ',')
-				break;
+      if (offset + 2 < inputBufferCnt)
+      {
+        if (inputBuffer[offset] != ',')
+          break;
 
-			++offset;
+        ++offset;
 
-			while (inputBuffer[offset] >= '0' && inputBuffer[offset] <= '9')
-			{
-				++offset;
-			}
-		}
+        while (inputBuffer[offset] >= '0' && inputBuffer[offset] <= '9')
+        {
+          ++offset;
+        }
+      }
+    }
+    else if (type == TYPE_UDP)
+    {
+      // UDP local port
+
+  		if (offset + 2 == inputBufferCnt)  // Local port not specified
+      {
+        error = 0;
+        break;
+      }
+
+      if (inputBuffer[offset] != ',')
+        break;
+
+      ++offset;
+
+  		if (!readNumber(inputBuffer, offset, localPort) || localPort > 65535)
+	  		break;
+
+      // UDP mode (ignored)
+
+      if (offset + 2 < inputBufferCnt)
+      {
+        if (inputBuffer[offset] != ',')
+          break;
+
+        ++offset;
+
+        while (inputBuffer[offset] >= '0' && inputBuffer[offset] <= '9')
+        {
+          ++offset;
+        }
+      }
+    }
 
 		if (offset + 2 != inputBufferCnt)
 			break;
@@ -1998,7 +2046,8 @@ void cmd_AT_CIPSTART()
 	{
 		do
 		{
-			AT_DEBUG_PRINTF("--- linkId=%d, type=%d, addr=%s, port=%d\r\n", linkID, type, remoteAddr, (uint16_t)remotePort);
+			AT_DEBUG_PRINTF("--- linkId=%d, type=%d, addr=%s, port=%d/%d\r\n", 
+          linkID, type, remoteAddr, (uint16_t)remotePort, (uint16_t)localPort);
 
 			// Check if connected to an AP or SoftAP is started
 			if (!(WiFi.isConnected() || (WiFi.getMode() & WIFI_AP) || gsEthConnected))
@@ -2007,87 +2056,129 @@ void cmd_AT_CIPSTART()
 				break;
 			}
 
-			// Check if the client is already connected
+      // Check if the client is already connected
 
-			if (clients[linkID].client != nullptr)
-			{
-				error = 5;
-				break;
-			}
+      if (clients[linkID].client != nullptr || clients[linkID].clientUDP != nullptr)
+      {
+        error = 5;
+        break;
+      }
 
-			WiFiClient *cli = nullptr;
+      // Check if the remote host exists
 
-			error = 99;
+      IPAddress remoteIP;
+      uint16_t _timeout = 5000;
+      if (!WiFi.hostByName(remoteAddr, remoteIP, _timeout))
+      {
+        error = 100;
 
-			if (type == 0) // TCP
-			{
-				cli = new WiFiClient();
-			}
-			else if (type == 2) // SSL
-			{
-				cli = new BearSSL::WiFiClientSecure();
+        Serial.println(F("DNS Fail"));
+        break;
+      }
 
-				if (gsCipSslSize != 16384)
-					static_cast<BearSSL::WiFiClientSecure *>(cli)->setBufferSizes(gsCipSslSize, 512);
+      if (type == TYPE_TCP || type == TYPE_SSL)
+      {
+        WiFiClient *cli = nullptr;
 
-				if (gsCipSslAuth == 0)
-				{
-					static_cast<BearSSL::WiFiClientSecure *>(cli)->setInsecure();
-				}
-				else if (gsCipSslAuth == 1 && fingerprintValid)
-				{
-					static_cast<BearSSL::WiFiClientSecure *>(cli)->setFingerprint(fingerprint);
-				}
-				else if (gsCipSslAuth == 2 && CAcert->getCount() > 0) // certificate chain verification
-				{
-					static_cast<BearSSL::WiFiClientSecure *>(cli)->setTrustAnchors(CAcert);
-				}
-				else
-				{
-					delete cli;
-					break; // error
-				}
-			}
+        error = 99;
 
-			// Check OOM
-			if (cli == nullptr)
-				break;
+        if (type == TYPE_TCP) // TCP
+        {
+          cli = new WiFiClient();
+        }
+        else if (type == TYPE_SSL) // SSL
+        {
+          cli = new BearSSL::WiFiClientSecure();
 
-			// Test if the remote host exists
-			IPAddress remoteIP;
-			uint16_t _timeout = 5000;
-			if (!WiFi.hostByName(remoteAddr, remoteIP, _timeout))
-			{
-				delete cli;
-				error = 100;
+          if (gsCipSslSize != 16384)
+            static_cast<BearSSL::WiFiClientSecure *>(cli)->setBufferSizes(gsCipSslSize, 512);
 
-				Serial.println(F("DNS Fail"));
-				break;
-			}
+          if (gsCipSslAuth == 0)
+          {
+            static_cast<BearSSL::WiFiClientSecure *>(cli)->setInsecure();
+          }
+          else if (gsCipSslAuth == 1 && fingerprintValid)
+          {
+            static_cast<BearSSL::WiFiClientSecure *>(cli)->setFingerprint(fingerprint);
+          }
+          else if (gsCipSslAuth == 2 && CAcert->getCount() > 0) // certificate chain verification
+          {
+            static_cast<BearSSL::WiFiClientSecure *>(cli)->setTrustAnchors(CAcert);
+          }
+          else
+          {
+            delete cli;
+            break; // error
+          }
+        }
 
-			// Connect using remote host name, not ip address (necessary for TLS)
-			if (!cli->connect(remoteAddr, remotePort))
-			{
-				Serial.println("connect fail");
+        // Check OOM
+        if (cli == nullptr)
+          break;
 
-				delete cli;
-				error = 100;
+        // Connect using remote host name, not ip address (necessary for TLS)
+        if (!cli->connect(remoteAddr, remotePort))
+        {
+          Serial.println("connect fail");
 
-				break;
-			}
+          delete cli;
+          error = 100;
 
-			if (gsCipMux == 0)
-				Serial.println(F("CONNECT\r\n\r\nOK"));
-			else
-				Serial.printf_P(PSTR("%d,CONNECT\r\n\r\nOK\r\n"), linkID);
+          break;
+        }
 
-			clients[linkID].client = cli;
-			clients[linkID].type = type;
-			clients[linkID].lastAvailableBytes = 0;
+        if (gsCipMux == 0)
+          Serial.println(F("CONNECT\r\n\r\nOK"));
+        else
+          Serial.printf_P(PSTR("%d,CONNECT\r\n\r\nOK\r\n"), linkID);
 
-			gsWasConnected = true; // Flag for CIPSTATUS command
+        clients[linkID].client = cli;
+        clients[linkID].type = type;
+        clients[linkID].lastAvailableBytes = 0;
 
-			error = 0;
+        gsWasConnected = true; // Flag for CIPSTATUS command
+
+        error = 0;
+      }
+      else if (type == TYPE_UDP)
+      {
+        WiFiUDP *cli = new WiFiUDP();
+
+        // Check OOM
+        if (cli == nullptr)
+          break;
+
+        // Start listener using local port
+        if (localPort == 0)
+        {
+          localPort = 28500 + linkID;  // let's hope it is not used
+        }
+
+        if (!cli->begin(localPort))
+        {
+          Serial.println("connect fail");
+
+          delete cli;
+          error = 100;
+
+          break;
+        }
+
+        if (gsCipMux == 0)
+          Serial.println(F("CONNECT\r\n\r\nOK"));
+        else
+          Serial.printf_P(PSTR("%d,CONNECT\r\n\r\nOK\r\n"), linkID);
+
+        clients[linkID].clientUDP = cli;
+        clients[linkID].type = type;
+        clients[linkID].lastAvailableBytes = 0;
+        clients[linkID].remoteUDPAddr = remoteIP;
+        clients[linkID].remoteUDPPort = remotePort;
+
+        gsWasConnected = true; // Flag for CIPSTATUS command
+
+        error = 0;        
+      }
 
 		} while (0);
 	}
@@ -2185,7 +2276,7 @@ void cmd_AT_CIPSEND()
 		client_t *cli = &(clients[linkId]);
 
 		// Test the link
-		if (cli->client == nullptr || !cli->client->connected())
+		if ((cli->client == nullptr || !cli->client->connected()) && cli->clientUDP == nullptr)
 		{
 			Serial.println(F("link is not valid"));
 			break;
@@ -2312,32 +2403,48 @@ void cmd_AT_CIPCLOSE()
 		{
 			if (id == linkId || linkId == 5)
 			{
-				// Disconnect
-				WiFiClient *cli = clients[id].client;
+        // Disconnect UDP
+        WiFiUDP *cliUDP = clients[id].clientUDP;
 
-				if (cli == nullptr)
-				{
-					if (linkId != 5)
-					{
-						if (gsCipMux != 0)
-							Serial.println(F("UNLINK"));
-
-						error = 1;
-						break;
-					}
-				}
-				else
-				{
-					if (cli->connected())
-						cli->stop();
-
+        if (cliUDP != nullptr)
+        {
+          cliUDP->stop();
 					DeleteClient(id);
 
 					if (gsCipMux == 0)
 						Serial.println(F("CLOSED"));
 					else
 						Serial.printf_P(PSTR("%d,CLOSED\r\n"), id);
-				}
+        }
+        else
+        {
+          // Disconnect TCP, SSL
+          WiFiClient *cli = clients[id].client;
+
+          if (cli == nullptr)
+          {
+            if (linkId != 5)
+            {
+              if (gsCipMux != 0)
+                Serial.println(F("UNLINK"));
+
+              error = 1;
+              break;
+            }
+          }
+          else
+          {
+            if (cli->connected())
+              cli->stop();
+
+            DeleteClient(id);
+
+            if (gsCipMux == 0)
+              Serial.println(F("CLOSED"));
+            else
+              Serial.printf_P(PSTR("%d,CLOSED\r\n"), id);
+          }
+        }
 			}
 
 			if (error)
@@ -2389,7 +2496,7 @@ void cmd_AT_CIPMUX()
 
 			for (uint8_t i = 0; i <= 4; ++i)
 			{
-				if (clients[i].client != nullptr)
+				if (clients[i].client != nullptr || clients[i].clientUDP != nullptr)
 				{
 					Serial.println(F("link is builded"));
 					openedError = true;

@@ -50,10 +50,10 @@
  * 0.4.0a: AT+CIPSTATUS lists SoftAP TCP connections [J.A]
  * 0.4.0b: AT+CIPDOMAIN implementation [J.A]
  * 0.5.0: support Ethernet AT+CIPETH, AT+CIPETHMAC, AT+CEHOSTNAME and modified AT+CWDHCP [J.A]
+ * 0.6.0: support UDP
  *
  * TODO:
  * - Implement AP mode DHCP settings and AT+CWLIF
- * - Implement UDP
  * - TLS Security - persistent fingerprint and single certificate, AT+CIPSSLAUTH_DEF
  */
 
@@ -86,7 +86,7 @@ ETHERNET_CLASS Ethernet(ETHERNET_CS);
  * Defines
  */
 
-const char APP_VERSION[] = "0.5.0";
+const char APP_VERSION[] = "0.6.0";
 
 /*
  * Constants
@@ -108,11 +108,11 @@ WiFiEventHandler onConnectedHandler;
 WiFiEventHandler onGotIPHandler;
 WiFiEventHandler onDisconnectedHandler;
 
-client_t clients[5] = {{nullptr, TYPE_NONE, 0, 0, 0},
-					   {nullptr, TYPE_NONE, 0, 0, 0},
-					   {nullptr, TYPE_NONE, 0, 0, 0},
-					   {nullptr, TYPE_NONE, 0, 0, 0},
-					   {nullptr, TYPE_NONE, 0, 0, 0}};
+client_t clients[5] = {{nullptr, nullptr, TYPE_NONE, 0, 0, 0, 0, 0},
+					   {nullptr, nullptr, TYPE_NONE, 0, 0, 0, 0, 0},
+					   {nullptr, nullptr, TYPE_NONE, 0, 0, 0, 0, 0},
+					   {nullptr, nullptr, TYPE_NONE, 0, 0, 0, 0, 0},
+					   {nullptr, nullptr, TYPE_NONE, 0, 0, 0, 0, 0}};
 
 WiFiServer servers[] = {WiFiServer(0), WiFiServer(0), WiFiServer(0), WiFiServer(0), WiFiServer(0)};
 const uint8_t SERVERS_COUNT = sizeof(servers) / sizeof(WiFiServer);
@@ -353,6 +353,7 @@ void loop()
 		uint8_t freeLinkId = 255;
 		uint8_t serversConnCount = 0;
 
+    // Handle TCP and SSL
 		for (uint8_t i = 0; i <= maxCli; ++i)
 		{
 			WiFiClient *cli = clients[i].client;
@@ -426,11 +427,46 @@ void loop()
 					}
 				}
 			}
-			else if (freeLinkId == 255)
+			else if (clients[i].clientUDP == nullptr && freeLinkId == 255)
 			{
 				freeLinkId = i;
 			}
 		}
+
+    // Handle UDP
+		for (uint8_t i = 0; i <= maxCli; ++i)
+		{
+			WiFiUDP *cliUDP = clients[i].clientUDP;
+
+			if (cliUDP != nullptr)
+      {
+        int packetSize = cliUDP->parsePacket();
+
+        if (packetSize > 0)
+        {
+          Serial.println();
+      		Serial.print(F("+IPD"));
+
+          if (gsCipMux == 1 && gsCipRecvMode == 0)
+          {
+            Serial.printf_P(PSTR(",%d"), i);
+          }
+          Serial.printf_P(PSTR(",%d:"), packetSize);
+
+          for (int j = 0; j < packetSize; j++)
+          {
+            unsigned char buf;
+            if (cliUDP->read(&buf, 1) != 1)
+            {
+              Serial.println("\r\nERROR");
+              break;              
+            }
+            Serial.write(buf);
+          }
+          Serial.println();
+        }
+      }
+    }
 
 		// handle server clients. check for a new connection only if we can add it
 		for (uint8_t i = 0; i < SERVERS_COUNT; ++i)
@@ -507,19 +543,59 @@ void loop()
 				Serial.printf_P(PSTR("\r\nRecv %d bytes\r\n"), clients[gsLinkIdReading].sendLength);
 
 				// Send the data to the client
-				size_t s = clients[gsLinkIdReading].client->write(sendBuffer, clients[gsLinkIdReading].sendLength);
+        if (clients[gsLinkIdReading].client != nullptr)
+        {
+          size_t s = clients[gsLinkIdReading].client->write(sendBuffer, clients[gsLinkIdReading].sendLength);
 
-				if (s == clients[gsLinkIdReading].sendLength)
-				{
-					Serial.println(F("\r\nSEND OK"));
-					clients[gsLinkIdReading].lastActivityMillis = millis();
-				}
-				else
-				{
-					Serial.println(F("\r\nSEND FAIL"));
-					if (clients[gsLinkIdReading].client->connected())
-						clients[gsLinkIdReading].client->stop();
-				}
+          if (s == clients[gsLinkIdReading].sendLength)
+          {
+            Serial.println(F("\r\nSEND OK"));
+            clients[gsLinkIdReading].lastActivityMillis = millis();
+          }
+          else
+          {
+            Serial.println(F("\r\nSEND FAIL"));
+            if (clients[gsLinkIdReading].client->connected())
+              clients[gsLinkIdReading].client->stop();
+          }
+        }
+        else if (clients[gsLinkIdReading].clientUDP != nullptr)
+        {
+          WiFiUDP *cliUDP = clients[gsLinkIdReading].clientUDP;
+          int error = 0;
+
+          if (cliUDP->beginPacket(clients[gsLinkIdReading].remoteUDPAddr, clients[gsLinkIdReading].remoteUDPPort) == 0)
+          {
+            error = 1;
+          }
+          if (error == 0)
+          {
+            size_t s = cliUDP->write(sendBuffer, clients[gsLinkIdReading].sendLength);
+
+            if (s != clients[gsLinkIdReading].sendLength)
+            {
+              error = 2;
+            }
+          }
+          if (error == 0)
+          {
+            if (cliUDP->endPacket() == 0)
+            {
+              error = 3;
+            }
+          }
+
+          if (error == 0)
+          {
+            Serial.println(F("\r\nSEND OK"));
+            clients[gsLinkIdReading].lastActivityMillis = millis();
+          }
+          else
+          {
+            Serial.println(F("\r\nSEND FAIL"));
+            DeleteClient(gsLinkIdReading);
+          }
+        }
 
 				// Stop data reading
 				gsLinkIdReading = -1;
@@ -761,12 +837,20 @@ void DeleteClient(uint8_t index)
 		cli->client = nullptr;
 		AT_DEBUG_PRINTF("--- client deleted: %d\r\n", index);
 	}
+	if (cli->clientUDP != nullptr)
+	{
+		delete cli->clientUDP;
+		cli->clientUDP = nullptr;
+		AT_DEBUG_PRINTF("--- client UDP deleted: %d\r\n", index);
+	}
 
 	if (index == gsLinkIdReading)
 		gsLinkIdReading = -1;
 
 	cli->sendLength = 0;
 	cli->type = TYPE_NONE;
+  cli->remoteUDPAddr = uint32_t(0);
+  cli->remoteUDPPort = 0;
 }
 
 /*

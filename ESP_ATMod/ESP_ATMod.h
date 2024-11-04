@@ -21,6 +21,7 @@
 #define ESP_ATMOD_H_
 
 #include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
 
 //#define ETHERNET_CLASS LwipIntfDevPatch<Wiznet5500>
 #define ETHERNET_CS 5
@@ -46,10 +47,13 @@ enum clientTypes_t
 typedef struct
 {
 	WiFiClient *client;
+  WiFiUDP *clientUDP;
 	clientTypes_t type;
 	uint16_t sendLength;
 	uint16_t lastAvailableBytes;
 	uint32_t lastActivityMillis;
+  IPAddress remoteUDPAddr;
+  uint16_t remoteUDPPort;
 } client_t;
 
 typedef struct
