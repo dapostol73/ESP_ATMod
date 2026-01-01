@@ -12,7 +12,7 @@ Note...it is recommand to run the following commands (in this order) the first t
 
 ```
 AT+RESTORE
-AT+RST"
+AT+RST
 AT+CWMODE=1
 AT+RST
 ```
