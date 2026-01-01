@@ -4,6 +4,19 @@ This firmware comes as an [Arduino esp8266](https://github.com/esp8266/Arduino#a
 
 This file refers to version 0.5.0 of the firmware.
 
+## Fork Changes
+
+Add PlatformIO build configuration for Mega board with integrate ESP8266EX onboard.  Allowing you to compile and flash board directly from PlatformIO.  
+
+Note...it is recommand to run the following commands (in this order) the first time the board boots up to make sure things run properly, I had connection issue without these.
+
+```
+AT+RESTORE
+AT+RST"
+AT+CWMODE=1
+AT+RST
+```
+
 ## Purpose
 
 The AT firmware provided by Espressif comes with basic TLS ciphersuites only. Especially, the lack of GCM-based ciphersuites makes the SSL part of the Espressif's firmware unusable on more and more web sites. This firmware addresses this issue.
